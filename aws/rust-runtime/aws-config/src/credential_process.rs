@@ -14,11 +14,10 @@ use aws_credential_types::credential_feature::AwsCredentialFeature;
 use aws_credential_types::provider::{self, error::CredentialsError, future, ProvideCredentials};
 use aws_credential_types::Credentials;
 use aws_smithy_json::deserialize::Token;
+use aws_smithy_types::date_time::{DateTime, Format};
 use std::borrow::Cow;
 use std::process::Command;
 use std::time::SystemTime;
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
 
 /// External process credentials provider
 ///
@@ -270,12 +269,15 @@ pub(crate) fn parse_credential_process_json_credentials(
 }
 
 fn parse_expiration(expiration: impl AsRef<str>) -> Result<SystemTime, InvalidJsonCredentials> {
-    OffsetDateTime::parse(expiration.as_ref(), &Rfc3339)
-        .map(SystemTime::from)
-        .map_err(|err| InvalidJsonCredentials::InvalidField {
+    let invalid_expiration = |err: Box<dyn std::error::Error + Send + Sync>| {
+        InvalidJsonCredentials::InvalidField {
             field: "Expiration",
-            err: err.into(),
-        })
+            err,
+        }
+    };
+    let expiration = DateTime::from_str(expiration.as_ref(), Format::DateTimeWithOffset)
+        .map_err(|err| invalid_expiration(err.into()))?;
+    SystemTime::try_from(expiration).map_err(|err| invalid_expiration(err.into()))
 }
 
 #[cfg(test)]
@@ -285,8 +287,6 @@ mod test {
     use aws_credential_types::credential_feature::AwsCredentialFeature;
     use aws_credential_types::provider::ProvideCredentials;
     use std::time::{Duration, SystemTime};
-    use time::format_description::well_known::Rfc3339;
-    use time::OffsetDateTime;
     use tokio::time::timeout;
 
     /// Builds a shell command that prints `json` to stdout, quoted correctly for
@@ -325,10 +325,8 @@ mod test {
         assert_eq!(creds.account_id().unwrap().as_str(), "123456789001");
         assert_eq!(
             creds.expiry(),
-            Some(SystemTime::from(
-                OffsetDateTime::parse("2022-05-02T18:36:00+00:00", &Rfc3339)
-                    .expect("static datetime"),
-            ))
+            // 2022-05-02T18:36:00+00:00
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1651516560))
         );
     }
 

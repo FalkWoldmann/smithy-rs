@@ -78,6 +78,43 @@ fn remove_trailing_zeros(string: &mut String) {
     }
 }
 
+/// Calendar helpers shared by the date-time formats.
+///
+/// These are built on [`jiff::civil::DateTime`] rather than [`jiff::Timestamp`] since the
+/// former covers all of `0001-01-01T00:00:00Z` through `9999-12-31T23:59:59.999999999Z`,
+/// which is the range Smithy's textual timestamp formats need to be able to represent.
+mod civil {
+    use crate::DateTime;
+    use jiff::civil;
+    use jiff::SignedDuration;
+
+    const UNIX_EPOCH: civil::DateTime = civil::DateTime::constant(1970, 1, 1, 0, 0, 0, 0);
+
+    /// Converts a `DateTime` into its proleptic Gregorian calendar representation in UTC.
+    pub(super) fn from_date_time(date_time: &DateTime) -> Result<civil::DateTime, jiff::Error> {
+        // `subsec_nanos` is always less than one second, so it always fits in an `i32`.
+        let since_epoch = SignedDuration::new(date_time.secs(), date_time.subsec_nanos() as i32);
+        UNIX_EPOCH.checked_add(since_epoch)
+    }
+
+    /// Returns the time elapsed between the Unix epoch and the given calendar date-time in UTC.
+    pub(super) fn duration_since_epoch(date_time: civil::DateTime) -> SignedDuration {
+        date_time.duration_since(UNIX_EPOCH)
+    }
+
+    /// Converts a duration relative to the Unix epoch into a `DateTime`.
+    pub(super) fn to_date_time(since_epoch: SignedDuration) -> DateTime {
+        // `SignedDuration` keeps the sign of its seconds and subsecond nanos in agreement,
+        // whereas `DateTime` wants subsecond nanos that always count forwards.
+        let (mut secs, mut nanos) = (since_epoch.as_secs(), since_epoch.subsec_nanos());
+        if nanos < 0 {
+            secs -= 1;
+            nanos += super::NANOS_PER_SECOND as i32;
+        }
+        DateTime::from_secs_and_nanos(secs, nanos as u32)
+    }
+}
+
 pub(crate) mod epoch_seconds {
     use super::remove_trailing_zeros;
     use super::{DateTimeParseError, DateTimeParseErrorKind};
@@ -143,12 +180,12 @@ pub(crate) mod epoch_seconds {
 
 pub(crate) mod http_date {
     use crate::date_time::format::{
-        DateTimeFormatError, DateTimeFormatErrorKind, DateTimeParseError, DateTimeParseErrorKind,
-        NANOS_PER_SECOND,
+        civil, DateTimeFormatError, DateTimeFormatErrorKind, DateTimeParseError,
+        DateTimeParseErrorKind, NANOS_PER_SECOND,
     };
     use crate::DateTime;
+    use jiff::civil::Weekday;
     use std::str::FromStr;
-    use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset, Weekday};
 
     // This code is taken from https://github.com/pyfisch/httpdate and modified under an
     // Apache 2.0 License. Modifications:
@@ -173,8 +210,7 @@ pub(crate) mod http_date {
             )
             .into()
         }
-        let structured = OffsetDateTime::from_unix_timestamp_nanos(date_time.as_nanos())
-            .map_err(out_of_range)?;
+        let structured = civil::from_date_time(date_time).map_err(out_of_range)?;
         let weekday = match structured.weekday() {
             Weekday::Monday => "Mon",
             Weekday::Tuesday => "Tue",
@@ -185,18 +221,19 @@ pub(crate) mod http_date {
             Weekday::Sunday => "Sun",
         };
         let month = match structured.month() {
-            Month::January => "Jan",
-            Month::February => "Feb",
-            Month::March => "Mar",
-            Month::April => "Apr",
-            Month::May => "May",
-            Month::June => "Jun",
-            Month::July => "Jul",
-            Month::August => "Aug",
-            Month::September => "Sep",
-            Month::October => "Oct",
-            Month::November => "Nov",
-            Month::December => "Dec",
+            1 => "Jan",
+            2 => "Feb",
+            3 => "Mar",
+            4 => "Apr",
+            5 => "May",
+            6 => "Jun",
+            7 => "Jul",
+            8 => "Aug",
+            9 => "Sep",
+            10 => "Oct",
+            11 => "Nov",
+            12 => "Dec",
+            _ => unreachable!("months are always between 1 and 12"),
         };
         let mut out = String::with_capacity(32);
         fn push_digit(out: &mut String, digit: u8) {
@@ -206,7 +243,7 @@ pub(crate) mod http_date {
 
         out.push_str(weekday);
         out.push_str(", ");
-        let day = structured.day();
+        let day = structured.day() as u8;
         push_digit(&mut out, day / 10);
         push_digit(&mut out, day % 10);
 
@@ -231,7 +268,7 @@ pub(crate) mod http_date {
 
         out.push(' ');
 
-        let hour = structured.hour();
+        let hour = structured.hour() as u8;
 
         // Extract the individual digits from hour
         push_digit(&mut out, hour / 10);
@@ -240,13 +277,13 @@ pub(crate) mod http_date {
         out.push(':');
 
         // Extract the individual digits from minute
-        let minute = structured.minute();
+        let minute = structured.minute() as u8;
         push_digit(&mut out, minute / 10);
         push_digit(&mut out, minute % 10);
 
         out.push(':');
 
-        let second = structured.second();
+        let second = structured.second() as u8;
         push_digit(&mut out, second / 10);
         push_digit(&mut out, second % 10);
 
@@ -334,25 +371,19 @@ pub(crate) mod http_date {
         let hours = parse_slice(&s[17..19])?;
         let minutes = parse_slice(&s[20..22])?;
         let seconds = parse_slice(&s[23..25])?;
-        let time = Time::from_hms_nano(hours, minutes, seconds, nanos).map_err(|err| {
-            DateTimeParseErrorKind::Invalid(
-                format!("time components are out of range: {err}").into(),
-            )
-        })?;
-
         let month = match &s[7..12] {
-            b" Jan " => Month::January,
-            b" Feb " => Month::February,
-            b" Mar " => Month::March,
-            b" Apr " => Month::April,
-            b" May " => Month::May,
-            b" Jun " => Month::June,
-            b" Jul " => Month::July,
-            b" Aug " => Month::August,
-            b" Sep " => Month::September,
-            b" Oct " => Month::October,
-            b" Nov " => Month::November,
-            b" Dec " => Month::December,
+            b" Jan " => 1,
+            b" Feb " => 2,
+            b" Mar " => 3,
+            b" Apr " => 4,
+            b" May " => 5,
+            b" Jun " => 6,
+            b" Jul " => 7,
+            b" Aug " => 8,
+            b" Sep " => 9,
+            b" Oct " => 10,
+            b" Nov " => 11,
+            b" Dec " => 12,
             month => {
                 return Err(DateTimeParseErrorKind::Invalid(
                     format!(
@@ -366,15 +397,15 @@ pub(crate) mod http_date {
         };
         let year = parse_slice(&s[12..16])?;
         let day = parse_slice(&s[5..7])?;
-        let date = Date::from_calendar_date(year, month, day).map_err(|err| {
-            DateTimeParseErrorKind::Invalid(
-                format!("date components are out of range: {err}").into(),
-            )
-        })?;
-        let date_time = PrimitiveDateTime::new(date, time).assume_offset(UtcOffset::UTC);
+        let date_time =
+            jiff::civil::DateTime::new(year, month, day, hours, minutes, seconds, nanos as i32)
+                .map_err(|err| {
+                    DateTimeParseErrorKind::Invalid(
+                        format!("date-time components are out of range: {err}").into(),
+                    )
+                })?;
 
-        Ok(DateTime::from_nanos(date_time.unix_timestamp_nanos())
-            .expect("this date format cannot produce out of range date-times"))
+        Ok(civil::to_date_time(civil::duration_since_epoch(date_time)))
     }
 
     fn parse_slice<T>(ascii_slice: &[u8]) -> Result<T, DateTimeParseError>
@@ -391,11 +422,11 @@ pub(crate) mod http_date {
 
 pub(crate) mod rfc3339 {
     use crate::date_time::format::{
-        DateTimeFormatError, DateTimeFormatErrorKind, DateTimeParseError, DateTimeParseErrorKind,
+        civil, DateTimeFormatError, DateTimeFormatErrorKind, DateTimeParseError,
+        DateTimeParseErrorKind,
     };
     use crate::DateTime;
-    use time::format_description::well_known::Rfc3339;
-    use time::OffsetDateTime;
+    use jiff::SignedDuration;
 
     #[derive(Debug, PartialEq)]
     pub(crate) enum AllowOffsets {
@@ -425,11 +456,124 @@ pub(crate) mod rfc3339 {
             )
             .into());
         }
-        let date_time = OffsetDateTime::parse(s, &Rfc3339).map_err(|err| {
+        parse_strict(s.as_bytes()).map_err(|err| {
             DateTimeParseErrorKind::Invalid(format!("invalid RFC-3339 date-time: {err}").into())
-        })?;
-        Ok(DateTime::from_nanos(date_time.unix_timestamp_nanos())
-            .expect("this date format cannot produce out of range date-times"))
+                .into()
+        })
+    }
+
+    /// Parses exactly the `date-time` production of RFC-3339 and nothing else.
+    ///
+    /// jiff's own timestamp parser is deliberately more lenient than RFC-3339: it also accepts
+    /// RFC-9557 annotations, ISO-8601 basic format, omitted seconds, offsets without a colon,
+    /// and more. Smithy timestamps are strictly RFC-3339, so the grammar is enforced here and
+    /// jiff is used to validate the calendar date and to do the calendar arithmetic.
+    fn parse_strict(s: &[u8]) -> Result<DateTime, std::borrow::Cow<'static, str>> {
+        /// Parses a fixed-width, unsigned decimal integer.
+        fn digits(s: &[u8], what: &'static str) -> Result<i16, String> {
+            s.iter().try_fold(0i16, |acc, b| match b {
+                b'0'..=b'9' => Ok(acc * 10 + i16::from(b - b'0')),
+                _ => Err(format!("the {what} component could not be parsed")),
+            })
+        }
+        fn literal(
+            s: &[u8],
+            idx: usize,
+            expected: &[u8],
+            what: &'static str,
+        ) -> Result<(), String> {
+            match s.get(idx) {
+                Some(b) if expected.contains(b) => Ok(()),
+                _ => Err(format!("expected {what}")),
+            }
+        }
+
+        // `YYYY-MM-DDTHH:MM:SS` is 19 bytes, and is followed by at least a 1 byte offset
+        if s.len() < 20 {
+            return Err("the date-time is too short".into());
+        }
+        let year = digits(&s[0..4], "year")?;
+        literal(s, 4, b"-", "`-` after the year")?;
+        let month = digits(&s[5..7], "month")?;
+        literal(s, 7, b"-", "`-` after the month")?;
+        let day = digits(&s[8..10], "day")?;
+        literal(s, 10, b"Tt", "`T` after the date")?;
+        let hour = digits(&s[11..13], "hour")?;
+        literal(s, 13, b":", "`:` after the hour")?;
+        let minute = digits(&s[14..16], "minute")?;
+        literal(s, 16, b":", "`:` after the minute")?;
+        let second = digits(&s[17..19], "second")?;
+
+        let mut rest = &s[19..];
+        let mut nanos = 0i32;
+        if let Some(fraction) = rest.strip_prefix(b".") {
+            let len = fraction.iter().take_while(|b| b.is_ascii_digit()).count();
+            if len == 0 {
+                return Err("the subsecond component could not be parsed".into());
+            }
+            // Precision beyond nanoseconds is truncated
+            let mut scale = 100_000_000;
+            for digit in &fraction[..len.min(9)] {
+                nanos += i32::from(digit - b'0') * scale;
+                scale /= 10;
+            }
+            rest = &fraction[len..];
+        }
+
+        let offset_secs = match rest {
+            [b'Z' | b'z'] => 0,
+            [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
+                let hours = digits(&[*h1, *h2], "offset hour")?;
+                let minutes = digits(&[*m1, *m2], "offset minute")?;
+                if hours > 23 || minutes > 59 {
+                    return Err("the offset is out of range".into());
+                }
+                let secs = i64::from(hours) * 3600 + i64::from(minutes) * 60;
+                if *sign == b'-' {
+                    -secs
+                } else {
+                    secs
+                }
+            }
+            _ => return Err("the offset component could not be parsed".into()),
+        };
+
+        // A leap second is represented as the last nanosecond of the second before it, and its
+        // position is validated once the offset has been applied.
+        let is_leap_second = second == 60;
+        let (second, nanos) = if is_leap_second {
+            (59, 999_999_999)
+        } else {
+            (second, nanos)
+        };
+
+        // The components above are at most 4 decimal digits (2 for everything except the year),
+        // so narrowing them cannot truncate. Range checking is left to jiff.
+        let local = jiff::civil::DateTime::new(
+            year,
+            month as i8,
+            day as i8,
+            hour as i8,
+            minute as i8,
+            second as i8,
+            nanos,
+        )
+        .map_err(|err| err.to_string())?;
+        let since_epoch = civil::duration_since_epoch(local)
+            .checked_sub(SignedDuration::from_secs(offset_secs))
+            .expect("date-times with four digit years are nowhere near the limits of a duration");
+        let date_time = civil::to_date_time(since_epoch);
+
+        if is_leap_second {
+            // Leap seconds are only ever inserted at the very end of a month in UTC
+            let is_valid = civil::from_date_time(&date_time).is_ok_and(|utc| {
+                utc.hour() == 23 && utc.minute() == 59 && utc.day() == utc.days_in_month()
+            });
+            if !is_valid {
+                return Err("leap seconds can only occur at the end of a month in UTC".into());
+            }
+        }
+        Ok(date_time)
     }
 
     /// Read 1 RFC-3339 date from &str and return the remaining str
@@ -456,16 +600,15 @@ pub(crate) mod rfc3339 {
             .into()
         }
         let (year, month, day, hour, minute, second, micros) = {
-            let s = OffsetDateTime::from_unix_timestamp_nanos(date_time.as_nanos())
-                .map_err(out_of_range)?;
+            let s = civil::from_date_time(date_time).map_err(out_of_range)?;
             (
                 s.year(),
-                u8::from(s.month()),
+                s.month(),
                 s.day(),
                 s.hour(),
                 s.minute(),
                 s.second(),
-                s.microsecond(),
+                (s.subsec_nanosecond() / 1_000) as u32,
             )
         };
 
@@ -755,6 +898,84 @@ mod tests {
                 kind: DateTimeParseErrorKind::Invalid(_)
             }
         ));
+    }
+
+    #[test]
+    fn rfc3339_is_strict() {
+        for invalid in [
+            // RFC-9557 annotations
+            "1985-04-12T23:20:50Z[UTC]",
+            "1985-04-12T23:20:50+01:00[Europe/Paris]",
+            // ISO-8601 forms that aren't in RFC-3339
+            "19850412T232050Z",
+            "1985-04-12T23:20Z",
+            "1985-04-12T23:20:50,5Z",
+            "1985-04-12T23:20:50+0530",
+            "1985-04-12T23:20:50+05",
+            "1985-04-12T23:20:50+05:30:15",
+            "+001985-04-12T23:20:50Z",
+            "-000001-04-12T23:20:50Z",
+            // Missing or malformed pieces
+            "1985-04-12",
+            "1985-04-12T23:20:50",
+            "1985-04-12T23:20:50.Z",
+            "1985-04-12T23:20:50+24:00",
+            "1985-04-12T23:20:50+00:60",
+            "1985-04-12T24:00:00Z",
+            "1985-02-29T00:00:00Z",
+            " 1985-04-12T23:20:50Z",
+            "1985-04-12T23:20:50Z ",
+            "",
+        ] {
+            assert!(
+                rfc3339::parse(invalid, AllowOffsets::OffsetsAllowed).is_err(),
+                "{invalid:?} should have been rejected"
+            );
+        }
+
+        for (valid, secs, nanos) in [
+            ("1985-04-12t23:20:50z", 482196050, 0),
+            ("1985-04-12T23:20:50-00:00", 482196050, 0),
+            ("1985-04-12T23:20:50+23:59", 482109710, 0),
+            // Precision beyond nanoseconds is truncated
+            ("1985-04-12T23:20:50.1234567891Z", 482196050, 123_456_789),
+            // The full range of four digit years is supported, even when the offset pushes
+            // the instant itself beyond it
+            ("0000-01-01T00:00:00Z", -62167219200, 0),
+            ("0000-01-01T00:00:00+01:00", -62167222800, 0),
+            ("9999-12-31T23:59:59.999999999Z", 253402300799, 999_999_999),
+            ("9999-12-31T23:59:59-01:00", 253402304399, 0),
+        ] {
+            assert_eq!(
+                DateTime::from_secs_and_nanos(secs, nanos),
+                rfc3339::parse(valid, AllowOffsets::OffsetsAllowed).unwrap(),
+                "{valid:?} parsed incorrectly"
+            );
+        }
+    }
+
+    #[test]
+    fn rfc3339_leap_seconds() {
+        // Leap seconds become the final nanosecond of the second that precedes them
+        let expected = DateTime::from_secs_and_nanos(662687999, 999_999_999);
+        for valid in ["1990-12-31T23:59:60Z", "1990-12-31T15:59:60-08:00"] {
+            assert_eq!(
+                expected,
+                rfc3339::parse(valid, AllowOffsets::OffsetsAllowed).unwrap()
+            );
+        }
+        // They can only occur at the end of a month in UTC
+        for invalid in [
+            "1990-06-15T12:30:60Z",
+            "1990-12-30T23:59:60Z",
+            "1990-12-31T23:59:60-08:00",
+            "1990-12-31T23:59:61Z",
+        ] {
+            assert!(
+                rfc3339::parse(invalid, AllowOffsets::OffsetsAllowed).is_err(),
+                "{invalid:?} should have been rejected"
+            );
+        }
     }
 
     #[test]

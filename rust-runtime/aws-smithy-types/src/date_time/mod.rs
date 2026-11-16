@@ -620,21 +620,20 @@ mod test {
     #[cfg(not(any(target_arch = "powerpc", target_arch = "x86", target_os = "windows")))]
     #[test]
     fn system_time_conversions() {
+        use jiff::Timestamp;
         use std::time::SystemTime;
-        use time::format_description::well_known::Rfc3339;
-        use time::OffsetDateTime;
         // Check agreement
         let date_time = DateTime::from_str("1000-01-02T01:23:10.123Z", Format::DateTime).unwrap();
-        let off_date_time = OffsetDateTime::parse("1000-01-02T01:23:10.123Z", &Rfc3339).unwrap();
+        let timestamp: Timestamp = "1000-01-02T01:23:10.123Z".parse().unwrap();
         assert_eq!(
-            SystemTime::from(off_date_time),
+            SystemTime::try_from(timestamp).unwrap(),
             SystemTime::try_from(date_time).unwrap()
         );
 
         let date_time = DateTime::from_str("2039-10-31T23:23:10.456Z", Format::DateTime).unwrap();
-        let off_date_time = OffsetDateTime::parse("2039-10-31T23:23:10.456Z", &Rfc3339).unwrap();
+        let timestamp: Timestamp = "2039-10-31T23:23:10.456Z".parse().unwrap();
         assert_eq!(
-            SystemTime::from(off_date_time),
+            SystemTime::try_from(timestamp).unwrap(),
             SystemTime::try_from(date_time).unwrap()
         );
     }

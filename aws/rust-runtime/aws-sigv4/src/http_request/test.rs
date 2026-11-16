@@ -16,8 +16,12 @@ use http::Uri;
 use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::time::{Duration, SystemTime};
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
+
+/// Parses an RFC-3339 timestamp from a test case into a `SystemTime`
+fn parse_timestamp(timestamp: &str) -> SystemTime {
+    let timestamp: jiff::Timestamp = timestamp.parse().expect("valid timestamp");
+    SystemTime::try_from(timestamp).expect("representable as a `SystemTime`")
+}
 
 /// Common test suite collection
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -280,9 +284,7 @@ impl<'a> From<&'a TestContext> for crate::sign::v4::SigningParams<'a, SigningSet
             identity: &tc.identity,
             region: &tc.region,
             name: &tc.service,
-            time: OffsetDateTime::parse(&tc.timestamp, &Rfc3339)
-                .unwrap()
-                .into(),
+            time: parse_timestamp(&tc.timestamp),
             settings: SigningSettings {
                 // payload_checksum_kind: PayloadChecksumKind::XAmzSha256,
                 expires_in: Some(Duration::from_secs(tc.expiration_in_seconds)),
@@ -313,8 +315,6 @@ pub(crate) mod v4a {
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::{DerSignature, SigningKey};
     use std::time::Duration;
-    use time::format_description::well_known::Rfc3339;
-    use time::OffsetDateTime;
 
     fn new_v4a_signing_params_from_context(
         test_context: &'_ TestContext,
@@ -384,9 +384,7 @@ pub(crate) mod v4a {
                 identity: &tc.identity,
                 region_set: &tc.region,
                 name: &tc.service,
-                time: OffsetDateTime::parse(&tc.timestamp, &Rfc3339)
-                    .unwrap()
-                    .into(),
+                time: parse_timestamp(&tc.timestamp),
                 settings: SigningSettings {
                     // payload_checksum_kind: PayloadChecksumKind::XAmzSha256,
                     expires_in: Some(Duration::from_secs(tc.expiration_in_seconds)),
